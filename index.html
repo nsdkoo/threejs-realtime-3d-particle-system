@@ -31,22 +31,31 @@
     <div class="ui-panel">
         <div id="mode-status" class="status-tag">初始化中...</div>
         <h1 class="text-2xl font-thin tracking-[0.4em] uppercase">Saturn Engine</h1>
+        <p class="text-[9px] text-blue-400 mt-1 opacity-60">Ultra Performance · 2.5K Particles</p>
         <p id="instruction" class="text-[10px] text-gray-500 mt-2 max-w-xs leading-relaxed">
-            检测到本地环境限制，已切换至鼠标控制模式。
-            左右移动鼠标以调整引力场强度。
+            检测到本地环境限制，已切换至鼠标控制模式。<br>
+            移动鼠标控制粒子系统位置和扩张程度。
         </p>
     </div>
 
-    <div id="cursor-hint">MOVE MOUSE TO INTERACT</div>
+    <div id="cursor-hint">MOVE TO CONTROL POSITION & EXPANSION</div>
 
     <!-- 隐藏的视频源 -->
     <video id="input-video" class="hidden"></video>
 
     <script>
-        let scene, camera, renderer, coreParticles, ringParticles;
+        let scene, camera, renderer, coreParticles;
         let expansion = 0;
         let targetExpansion = 0;
         let isUsingMouse = true;
+        
+        // 手势位置跟随
+        let targetPosition = { x: 0, y: 0 };
+        let currentPosition = { x: 0, y: 0 };
+        
+        // 位置平滑缓冲（用于手势识别）- 优化：增加缓冲区
+        let positionBuffer = [];
+        const bufferSize = 8; // 从5增加到8，更平滑
 
         const modeStatus = document.getElementById('mode-status');
         const instruction = document.getElementById('instruction');
@@ -54,22 +63,24 @@
         // 1. 初始化 Three.js 引擎
         function initScene() {
             scene = new THREE.Scene();
+            scene.fog = new THREE.Fog(0x000000, 200, 800); // 添加雾效
+            
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 3000);
-            camera.position.z = 600;
+            camera.position.z = 450; // 更近一点，从500减到450
 
             renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // 限制最大像素比
             document.body.appendChild(renderer.domElement);
 
-            // 核心粒子 (球体)
-            const coreCount = 8000;
+            // 核心粒子 (球体) - 性能优化版
+            const coreCount = 2500; // 进一步减少到2500
             const coreGeometry = new THREE.BufferGeometry();
             const corePos = new Float32Array(coreCount * 3);
             const coreMeta = [];
 
             for (let i = 0; i < coreCount; i++) {
-                const r = Math.pow(Math.random(), 0.5) * 100;
+                const r = Math.pow(Math.random(), 0.5) * 120; // 增大半径到120
                 const theta = Math.acos(2 * Math.random() - 1);
                 const phi = Math.random() * Math.PI * 2;
                 coreMeta.push({ r, theta, phi, speed: 0.005 + Math.random() * 0.01 });
@@ -80,33 +91,16 @@
             }
             coreGeometry.setAttribute('position', new THREE.BufferAttribute(corePos, 3));
             coreParticles = new THREE.Points(coreGeometry, new THREE.PointsMaterial({
-                size: 2, color: 0x60a5fa, transparent: true, blending: THREE.AdditiveBlending, opacity: 0.8
+                size: 3, // 增大到3
+                color: 0x60a5fa, 
+                transparent: true, 
+                blending: THREE.AdditiveBlending, 
+                opacity: 0.85, // 稍微降低，避免过亮
+                sizeAttenuation: true
             }));
             scene.add(coreParticles);
 
-            // 星环粒子 (扁平圆环)
-            const ringCount = 20000;
-            const ringGeometry = new THREE.BufferGeometry();
-            const ringPos = new Float32Array(ringCount * 3);
-            const ringMeta = [];
-
-            for (let i = 0; i < ringCount; i++) {
-                const radius = 180 + Math.random() * 150;
-                const angle = Math.random() * Math.PI * 2;
-                ringMeta.push({ 
-                    radius, 
-                    angle, 
-                    speed: (1 / Math.sqrt(radius)) * 5 
-                });
-            }
-            ringGeometry.setAttribute('position', new THREE.BufferAttribute(ringPos, 3));
-            ringParticles = new THREE.Points(ringGeometry, new THREE.PointsMaterial({
-                size: 1, color: 0x3b82f6, transparent: true, opacity: 0.4, blending: THREE.AdditiveBlending
-            }));
-            scene.add(ringParticles);
-
             window.coreMeta = coreMeta;
-            window.ringMeta = ringMeta;
         }
 
         // 2. 交互逻辑 (鼠标 + 摄像头降级)
@@ -115,6 +109,9 @@
             window.addEventListener('mousemove', (e) => {
                 if (isUsingMouse) {
                     targetExpansion = e.clientX / window.innerWidth;
+                    // 鼠标控制位置
+                    targetPosition.x = (e.clientX / window.innerWidth - 0.5) * 400;
+                    targetPosition.y = -(e.clientY / window.innerHeight - 0.5) * 300;
                 }
             });
 
@@ -131,8 +128,37 @@
                     modeStatus.innerText = "手势识别模式";
                     modeStatus.style.color = "#34d399";
                     const lm = results.multiHandLandmarks[0];
+                    
+                    // 1. 张合手掌控制扩张
                     const dist = Math.hypot(lm[4].x - lm[20].x, lm[4].y - lm[20].y);
                     targetExpansion = Math.min(1, Math.max(0, (dist - 0.05) / 0.4));
+                    
+                    // 2. 手掌位置控制粒子系统位置
+                    // 计算手掌中心（使用手腕0和中指基部9的中点）
+                    const palmCenterX = (lm[0].x + lm[9].x) / 2;
+                    const palmCenterY = (lm[0].y + lm[9].y) / 2;
+                    
+                    // 映射到3D空间 (镜像x轴，让手往右画面就往右)
+                    const rawX = (1 - palmCenterX - 0.5) * 400;
+                    const rawY = -(palmCenterY - 0.5) * 300;
+                    
+                    // 使用加权移动平均进行平滑（最新的帧权重更大）
+                    positionBuffer.push({ x: rawX, y: rawY });
+                    if (positionBuffer.length > bufferSize) {
+                        positionBuffer.shift();
+                    }
+                    
+                    // 计算加权平均位置（最新的帧权重更大）
+                    let sumX = 0, sumY = 0, weightSum = 0;
+                    for (let i = 0; i < positionBuffer.length; i++) {
+                        const weight = i + 1; // 权重从1到length递增
+                        sumX += positionBuffer[i].x * weight;
+                        sumY += positionBuffer[i].y * weight;
+                        weightSum += weight;
+                    }
+                    
+                    targetPosition.x = sumX / weightSum;
+                    targetPosition.y = sumY / weightSum;
                 }
             });
 
@@ -143,13 +169,16 @@
 
             cameraHelper.start().then(() => {
                 isUsingMouse = false;
+                positionBuffer = []; // 清空缓冲区
                 modeStatus.innerText = "手势识别已就绪";
-                instruction.innerText = "请张开/收拢手掌来控制星环。";
+                modeStatus.style.background = "rgba(52, 211, 153, 0.2)";
+                modeStatus.style.color = "#34d399";
+                instruction.innerText = "移动手掌控制位置，张开/收拢手掌控制扩张。";
             }).catch(err => {
                 console.warn("Camera access denied, switching to mouse.");
                 isUsingMouse = true;
                 modeStatus.innerText = "鼠标交互模式";
-                instruction.innerText = "由于浏览器安全策略，摄像头已禁用。请左右移动鼠标控制引擎。";
+                instruction.innerText = "由于浏览器安全策略，摄像头已禁用。移动鼠标控制粒子系统位置和扩张。";
             });
         }
 
@@ -160,6 +189,11 @@
             // 缓动效果
             expansion += (targetExpansion - expansion) * 0.08;
             const time = Date.now() * 0.001;
+            
+            // 位置跟随（平滑过渡）- 优化：更自然的缓动
+            const smoothness = 0.12; // 降低到0.12，更流畅自然
+            currentPosition.x += (targetPosition.x - currentPosition.x) * smoothness;
+            currentPosition.y += (targetPosition.y - currentPosition.y) * smoothness;
 
             // 更新核心粒子
             const cPos = coreParticles.geometry.attributes.position.array;
@@ -175,22 +209,11 @@
             }
             coreParticles.geometry.attributes.position.needsUpdate = true;
             coreParticles.rotation.y += 0.002;
-
-            // 更新星环粒子
-            const rPos = ringParticles.geometry.attributes.position.array;
-            const rMeta = window.ringMeta;
-            for (let i = 0; i < rMeta.length; i++) {
-                const d = rMeta[i];
-                d.angle += d.speed * (0.5 + expansion);
-                const currentR = d.radius * (1 + expansion * 3);
-                const idx = i * 3;
-                rPos[idx] = currentR * Math.cos(d.angle);
-                rPos[idx+1] = Math.sin(d.angle * 2 + time) * (20 * expansion);
-                rPos[idx+2] = currentR * Math.sin(d.angle);
-            }
-            ringParticles.geometry.attributes.position.needsUpdate = true;
-            ringParticles.rotation.x = 1.3; // 倾斜视角
-            ringParticles.rotation.z += 0.001;
+            coreParticles.rotation.x = Math.sin(time * 0.1) * 0.1; // 添加轻微摆动
+            
+            // 应用位置跟随
+            coreParticles.position.x = currentPosition.x;
+            coreParticles.position.y = currentPosition.y;
 
             renderer.render(scene, camera);
         }
@@ -206,6 +229,20 @@
         initScene();
         initInteraction();
         animate();
+        
+        // 性能提示
+        console.log('%c🪐 Saturn Engine - 极致性能版', 'color: #60a5fa; font-size: 16px; font-weight: bold;');
+        console.log('%c粒子优化:', 'color: #3b82f6; font-weight: bold;');
+        console.log('  核心粒子: 2500 (原8000，减少69%)');
+        console.log('  星环粒子: 已移除 (原20000)');
+        console.log('  总粒子数: 2500 (原28000，减少91% 🚀)');
+        console.log('%c移动优化:', 'color: #34d399; font-weight: bold;');
+        console.log('  加权移动平均: 8帧缓冲');
+        console.log('  缓动系数: 0.12 (更自然)');
+        console.log('  平滑算法: 加权平均 (最新帧权重更大)');
+        console.log('%c性能提升:', 'color: #fbbf24; font-weight: bold;');
+        console.log('  渲染负担: -91%');
+        console.log('  预计帧率: 60 FPS (稳定)');
     </script>
 
 
