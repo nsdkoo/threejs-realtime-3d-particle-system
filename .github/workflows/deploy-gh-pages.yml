@@ -1,0 +1,24 @@
+name: Deploy to GitHub Pages
+
+# 触发条件：推送到 main 分支时执行
+on:
+  push:
+    branches: [main]
+
+# 执行任务
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. 拉取仓库代码
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. 部署到 GitHub Pages
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          # GitHub 自动生成的令牌，无需手动配置
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # 部署的文件来源（根目录所有文件）
+          publish_dir: ./
